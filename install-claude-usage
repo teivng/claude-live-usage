@@ -270,27 +270,45 @@ def main(stdscr):
         safe_add(stdscr, row, C4, "Cost",    curses.A_DIM | curses.A_BOLD)
         row += 1
 
-        totals = parse_sessions(now_month)
-        grand  = {"input":0,"output":0,"cache_r":0,"cache_w":0,"cost":0.0}
+        def draw_token_table(since):
+            totals = parse_sessions(since)
+            grand  = {"input":0,"output":0,"cache_r":0,"cache_w":0,"cost":0.0}
+            nonlocal row
+            if totals:
+                for model, t in sorted(totals.items(), key=lambda x: -x[1]["cost"]):
+                    if row >= h - 2: break
+                    name = model.replace("claude-","").replace("-202"," 202")
+                    safe_add(stdscr, row, C0, name[:34],            curses.color_pair(6))
+                    safe_add(stdscr, row, C1, fmt_tok(t["input"]),  curses.color_pair(4))
+                    safe_add(stdscr, row, C2, fmt_tok(t["output"]), curses.color_pair(5))
+                    safe_add(stdscr, row, C3, fmt_tok(t["cache_r"]),curses.A_DIM)
+                    safe_add(stdscr, row, C4, fmt_cost(t["cost"]),  curses.color_pair(1))
+                    for k in grand: grand[k] += t[k]
+                    row += 1
+                safe_add(stdscr, row, C0, "TOTAL",                      curses.A_BOLD)
+                safe_add(stdscr, row, C1, fmt_tok(grand["input"]),      curses.A_BOLD|curses.color_pair(4))
+                safe_add(stdscr, row, C2, fmt_tok(grand["output"]),     curses.A_BOLD|curses.color_pair(5))
+                safe_add(stdscr, row, C3, fmt_tok(grand["cache_r"]),    curses.A_BOLD|curses.A_DIM)
+                safe_add(stdscr, row, C4, fmt_cost(grand["cost"]),      curses.A_BOLD|curses.color_pair(1))
+            else:
+                safe_add(stdscr, row, C0, "No usage.", curses.A_DIM)
+            row += 1
 
-        if totals:
-            for model, t in sorted(totals.items(), key=lambda x: -x[1]["cost"]):
-                name = model.replace("claude-","").replace("-202"," 202")
-                safe_add(stdscr, row, C0, name[:34],            curses.color_pair(6))
-                safe_add(stdscr, row, C1, fmt_tok(t["input"]),  curses.color_pair(4))
-                safe_add(stdscr, row, C2, fmt_tok(t["output"]), curses.color_pair(5))
-                safe_add(stdscr, row, C3, fmt_tok(t["cache_r"]),curses.A_DIM)
-                safe_add(stdscr, row, C4, fmt_cost(t["cost"]),  curses.color_pair(1))
-                for k in grand: grand[k] += t[k]
-                row += 1
-                if row >= h - 2: break
-            safe_add(stdscr, row, C0, "TOTAL",                      curses.A_BOLD)
-            safe_add(stdscr, row, C1, fmt_tok(grand["input"]),      curses.A_BOLD|curses.color_pair(4))
-            safe_add(stdscr, row, C2, fmt_tok(grand["output"]),     curses.A_BOLD|curses.color_pair(5))
-            safe_add(stdscr, row, C3, fmt_tok(grand["cache_r"]),    curses.A_BOLD|curses.A_DIM)
-            safe_add(stdscr, row, C4, fmt_cost(grand["cost"]),      curses.A_BOLD|curses.color_pair(1))
-        else:
-            safe_add(stdscr, row, C0, "No usage this month.", curses.A_DIM)
+        draw_token_table(now_month)
+
+        if row < h - 4:
+            row += 1
+            safe_add(stdscr, row, 0, "─" * (w-1), curses.A_DIM)
+            row += 1
+            safe_add(stdscr, row, 0, "Last 7 Days", curses.A_BOLD | curses.color_pair(4))
+            row += 1
+            safe_add(stdscr, row, C0, "Model",   curses.A_DIM | curses.A_BOLD)
+            safe_add(stdscr, row, C1, "Input",   curses.A_DIM | curses.A_BOLD)
+            safe_add(stdscr, row, C2, "Output",  curses.A_DIM | curses.A_BOLD)
+            safe_add(stdscr, row, C3, "Cache↓",  curses.A_DIM | curses.A_BOLD)
+            safe_add(stdscr, row, C4, "Cost",    curses.A_DIM | curses.A_BOLD)
+            row += 1
+            draw_token_table(now - timedelta(days=7))
 
         stdscr.refresh()
         time.sleep(0.5)
