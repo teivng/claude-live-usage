@@ -85,7 +85,7 @@ Claude Code live usage dashboard.
 Shows 5-hour and 7-day quota bars + per-model token/cost breakdown.
 Refreshes in-place every 0.5s using curses. Press q or Ctrl-C to quit.
 """
-import curses, json, math, sys, time
+import curses, json, sys, time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -230,7 +230,7 @@ def main(stdscr):
                 if key not in rl: continue
                 info = rl[key]
                 if not isinstance(info, dict) or "used_percentage" not in info: continue
-                pct = math.ceil(float(info["used_percentage"]))
+                pct = float(info["used_percentage"])
                 ts_raw = info.get("resets_at")
                 reset_str = ""
                 if ts_raw:
