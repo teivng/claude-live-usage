@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# install-claude-usage — installs the `usage` live dashboard for Claude Code
+# Usage: bash install-claude-usage
+set -euo pipefail
+
+# ── colors ────────────────────────────────────────────────────────────────────
+R='\033[0m'; B='\033[1m'; G='\033[32m'; Y='\033[33m'; C='\033[36m'; E='\033[31m'
+info()    { echo -e "  ${C}•${R} $*"; }
+success() { echo -e "  ${G}✓${R} $*"; }
+warn()    { echo -e "  ${Y}!${R} $*"; }
+die()     { echo -e "  ${E}✗${R} $*" >&2; exit 1; }
+
+echo -e "\n${B}Claude Code Usage Dashboard — Installer${R}\n"
+
+# ── 1. find python3 ───────────────────────────────────────────────────────────
+PYTHON=""
+for p in python3 python; do
+    if command -v "$p" &>/dev/null && "$p" -c "import sys; sys.exit(0 if sys.version_info >= (3,7) else 1)" 2>/dev/null; then
+        PYTHON="$(command -v "$p")"
+        break
+    fi
+done
+[[ -n "$PYTHON" ]] || die "Python 3.7+ not found. Please install Python 3."
+info "Python: $PYTHON ($(${PYTHON} --version 2>&1))"
+
+# ── 2. verify claude code is installed ───────────────────────────────────────
+CLAUDE_DIR="$HOME/.claude"
+[[ -d "$CLAUDE_DIR" ]] || die "~/.claude not found — is Claude Code installed?"
+info "Claude config: $CLAUDE_DIR"
+
+# ── 3. choose install directory ───────────────────────────────────────────────
+# Prefer first writable dir already on PATH, then fall back to ~/bin
+INSTALL_DIR=""
+NEED_PATH_UPDATE=false
+
+for candidate in "$HOME/.local/bin" "$HOME/bin"; do
+    if [[ ":$PATH:" == *":$candidate:"* ]]; then
+        INSTALL_DIR="$candidate"
+        break
+    fi
+done
+
+# If none on PATH, use ~/.local/bin and offer to add it
+if [[ -z "$INSTALL_DIR" ]]; then
+    INSTALL_DIR="$HOME/.local/bin"
+    NEED_PATH_UPDATE=true
+fi
+
+mkdir -p "$INSTALL_DIR"
+info "Install dir: $INSTALL_DIR"
+
+# ── 4. write usage-statusline ─────────────────────────────────────────────────
+STATUSLINE="$INSTALL_DIR/usage-statusline"
+info "Writing $STATUSLINE"
+cat > "$STATUSLINE" << 'STATUSLINE_EOF'
+#!/usr/bin/env python3
+"""
+Claude Code statusLine script — caches rate_limits for the `usage` dashboard.
+Claude Code pipes a JSON object to stdin on every turn; we extract rate_limits
+and write it to ~/.claude/rate-limits-cache.json.
+"""
+import json, sys
+from pathlib import Path
+
+try:
+    data = json.loads(sys.stdin.read())
+    rate_limits = data.get("rate_limits")
+    if rate_limits:
+        cache = Path.home() / ".claude" / "rate-limits-cache.json"
+        cache.write_text(json.dumps(rate_limits))
+except Exception:
+    pass  # never crash — Claude Code ignores non-zero exits from statusLine
+print("", end="")  # statusLine must print something
+STATUSLINE_EOF
+chmod +x "$STATUSLINE"
+success "usage-statusline installed"
+
+# ── 5. write usage ────────────────────────────────────────────────────────────
+USAGE_BIN="$INSTALL_DIR/usage"
+info "Writing $USAGE_BIN"
+cat > "$USAGE_BIN" << 'USAGE_EOF'
+#!/usr/bin/env python3
+"""
+Claude Code live usage dashboard.
+Shows 5-hour and 7-day quota bars + per-model token/cost breakdown.
+Refreshes in-place every 0.5s using curses. Press q or Ctrl-C to quit.
+"""
+import curses, json, sys, time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+SESSIONS_DIR    = Path.home() / ".claude" / "projects"
+RATE_CACHE_FILE = Path.home() / ".claude" / "rate-limits-cache.json"
+
+PRICING = {
+    "claude-opus-4":     {"input": 15.00, "output": 75.00, "cache_r":  1.50, "cache_w": 18.75},
+    "claude-sonnet-4":   {"input":  3.00, "output": 15.00, "cache_r":  0.30, "cache_w":  3.75},
+    "claude-haiku-4":    {"input":  0.80, "output":  4.00, "cache_r":  0.08, "cache_w":  1.00},
+    "claude-3-5-sonnet": {"input":  3.00, "output": 15.00, "cache_r":  0.30, "cache_w":  3.75},
+    "claude-3-5-haiku":  {"input":  0.80, "output":  4.00, "cache_r":  0.08, "cache_w":  1.00},
+    "claude-3-opus":     {"input": 15.00, "output": 75.00, "cache_r":  1.50, "cache_w": 18.75},
+    "claude-3-haiku":    {"input":  0.25, "output":  1.25, "cache_r":  0.03, "cache_w":  0.30},
+}
+DEFAULT_PRICE = {"input": 3.00, "output": 15.00, "cache_r": 0.30, "cache_w": 3.75}
+
+def get_price(model):
+    for k, p in PRICING.items():
+        if k in model:
+            return p
+    return DEFAULT_PRICE
+
+def is_local(model):
+    return "claude" not in model.lower()
+
+def fmt_tok(n):
+    if n >= 1_000_000: return f"{n/1_000_000:.2f}M"
+    if n >= 1_000:     return f"{n/1_000:.1f}K"
+    return str(n)
+
+def fmt_cost(u):
+    if u >= 100: return f"${u:.2f}"
+    if u >= 1:   return f"${u:.3f}"
+    return f"${u:.4f}"
+
+def fmt_until(ts):
+    delta = datetime.fromtimestamp(ts, tz=timezone.utc) - datetime.now(timezone.utc)
+    s = max(0, int(delta.total_seconds()))
+    h, r = divmod(s, 3600)
+    return f"{h}h {r//60:02d}m" if h else f"{r//60}m {s%60:02d}s"
+
+def parse_sessions(since):
+    totals = {}
+    if not SESSIONS_DIR.exists():
+        return totals
+    for sess in SESSIONS_DIR.rglob("*.jsonl"):
+        try:
+            if datetime.fromtimestamp(sess.stat().st_mtime, tz=timezone.utc) < since:
+                continue
+            for line in sess.read_text(errors="ignore").splitlines():
+                if not line.strip(): continue
+                d = json.loads(line)
+                msg = d.get("message", {})
+                usage = msg.get("usage", {})
+                model = msg.get("model", "")
+                if not usage or not model or is_local(model): continue
+                inp = usage.get("input_tokens", 0)
+                out = usage.get("output_tokens", 0)
+                cr  = usage.get("cache_read_input_tokens", 0)
+                cw  = usage.get("cache_creation_input_tokens", 0)
+                p   = get_price(model)
+                cost = (inp/1e6)*p["input"] + (out/1e6)*p["output"] \
+                     + (cr/1e6)*p["cache_r"] + (cw/1e6)*p["cache_w"]
+                if model not in totals:
+                    totals[model] = {"input":0,"output":0,"cache_r":0,"cache_w":0,"cost":0.0}
+                totals[model]["input"]   += inp
+                totals[model]["output"]  += out
+                totals[model]["cache_r"] += cr
+                totals[model]["cache_w"] += cw
+                totals[model]["cost"]    += cost
+        except Exception:
+            continue
+    return totals
+
+def load_rate_limits():
+    try:
+        if RATE_CACHE_FILE.exists():
+            return json.loads(RATE_CACHE_FILE.read_text())
+    except Exception:
+        pass
+    return None
+
+def safe_add(win, y, x, text, attr=0):
+    h, w = win.getmaxyx()
+    if y >= h or x >= w: return
+    try: win.addstr(y, x, str(text)[:w-x-1], attr)
+    except curses.error: pass
+
+def draw_bar(win, y, x, label, pct, width, reset_str, cp):
+    filled = max(0, min(width, round(pct / 100 * width)))
+    bar = "█" * filled + "░" * (width - filled)
+    safe_add(win, y, x,            f"{label:<10}", curses.A_BOLD)
+    safe_add(win, y, x+10,         "[",            curses.A_DIM)
+    safe_add(win, y, x+11,         bar,            curses.color_pair(cp) | curses.A_BOLD)
+    safe_add(win, y, x+11+width,   "]",            curses.A_DIM)
+    safe_add(win, y, x+13+width,   f"{pct:5.1f}%", curses.color_pair(cp) | curses.A_BOLD)
+    if reset_str:
+        safe_add(win, y, x+20+width, f"  resets {reset_str}", curses.A_DIM)
+
+def main(stdscr):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    curses.start_color()
+    curses.use_default_colors()
+    curses.init_pair(1, curses.COLOR_GREEN,   -1)  # ok
+    curses.init_pair(2, curses.COLOR_YELLOW,  -1)  # warn
+    curses.init_pair(3, curses.COLOR_RED,     -1)  # crit
+    curses.init_pair(4, curses.COLOR_CYAN,    -1)  # heading
+    curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # output tokens
+    curses.init_pair(6, curses.COLOR_WHITE,   -1)  # normal
+
+    BAR_W    = 38
+    now_month = datetime.now(timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+
+    while True:
+        if stdscr.getch() in (ord('q'), ord('Q'), 27):
+            break
+        stdscr.erase()
+        now = datetime.now(timezone.utc)
+        h, w = stdscr.getmaxyx()
+        row = 0
+
+        # title
+        safe_add(stdscr, row, 0, " ⚡ Claude Usage ", curses.A_BOLD | curses.color_pair(6))
+        ts = now.strftime("%H:%M:%S UTC  q=quit")
+        safe_add(stdscr, row, w - len(ts) - 1, ts, curses.A_DIM)
+        row += 1
+        safe_add(stdscr, row, 0, "─" * (w-1), curses.A_DIM)
+        row += 1
+
+        # rate limit bars
+        rl = load_rate_limits()
+        safe_add(stdscr, row, 0, "Rate Limits", curses.A_BOLD | curses.color_pair(4))
+        row += 1
+
+        if rl and isinstance(rl, dict):
+            order = ["five_hour", "seven_day"]
+            ordered = order + [k for k in rl if k not in order]
+            drawn = 0
+            for key in ordered:
+                if key not in rl: continue
+                info = rl[key]
+                if not isinstance(info, dict) or "used_percentage" not in info: continue
+                pct = float(info["used_percentage"])
+                ts_raw = info.get("resets_at")
+                reset_str = ""
+                if ts_raw:
+                    try:
+                        reset_str = fmt_until(float(ts_raw))
+                    except Exception:
+                        pass
+                cp = 1 if pct < 60 else (2 if pct < 85 else 3)
+                lk = key.lower()
+                label = "5-hour" if "five" in lk else "weekly" if "seven" in lk else key
+                draw_bar(stdscr, row, 2, label, pct, BAR_W, reset_str, cp)
+                row += 1
+                drawn += 1
+            if not drawn:
+                safe_add(stdscr, row, 2, "Waiting for rate limit data…", curses.A_DIM)
+                row += 1
+        else:
+            safe_add(stdscr, row, 2,
+                "No data yet — updates after your next Claude Code turn.", curses.A_DIM)
+            row += 1
+
+        row += 1
+        safe_add(stdscr, row, 0, "─" * (w-1), curses.A_DIM)
+        row += 1
+
+        # token table
+        safe_add(stdscr, row, 0, "This Month",
+                 curses.A_BOLD | curses.color_pair(4))
+        safe_add(stdscr, row, 11, f"  {now.strftime('%B %Y')}", curses.A_DIM)
+        row += 1
+
+        C0, C1, C2, C3, C4 = 2, 38, 47, 56, 65
+        safe_add(stdscr, row, C0, "Model",   curses.A_DIM | curses.A_BOLD)
+        safe_add(stdscr, row, C1, "Input",   curses.A_DIM | curses.A_BOLD)
+        safe_add(stdscr, row, C2, "Output",  curses.A_DIM | curses.A_BOLD)
+        safe_add(stdscr, row, C3, "Cache↓",  curses.A_DIM | curses.A_BOLD)
+        safe_add(stdscr, row, C4, "Cost",    curses.A_DIM | curses.A_BOLD)
+        row += 1
+
+        totals = parse_sessions(now_month)
+        grand  = {"input":0,"output":0,"cache_r":0,"cache_w":0,"cost":0.0}
+
+        if totals:
+            for model, t in sorted(totals.items(), key=lambda x: -x[1]["cost"]):
+                name = model.replace("claude-","").replace("-202"," 202")
+                safe_add(stdscr, row, C0, name[:34],            curses.color_pair(6))
+                safe_add(stdscr, row, C1, fmt_tok(t["input"]),  curses.color_pair(4))
+                safe_add(stdscr, row, C2, fmt_tok(t["output"]), curses.color_pair(5))
+                safe_add(stdscr, row, C3, fmt_tok(t["cache_r"]),curses.A_DIM)
+                safe_add(stdscr, row, C4, fmt_cost(t["cost"]),  curses.color_pair(1))
+                for k in grand: grand[k] += t[k]
+                row += 1
+                if row >= h - 2: break
+            safe_add(stdscr, row, C0, "TOTAL",                      curses.A_BOLD)
+            safe_add(stdscr, row, C1, fmt_tok(grand["input"]),      curses.A_BOLD|curses.color_pair(4))
+            safe_add(stdscr, row, C2, fmt_tok(grand["output"]),     curses.A_BOLD|curses.color_pair(5))
+            safe_add(stdscr, row, C3, fmt_tok(grand["cache_r"]),    curses.A_BOLD|curses.A_DIM)
+            safe_add(stdscr, row, C4, fmt_cost(grand["cost"]),      curses.A_BOLD|curses.color_pair(1))
+        else:
+            safe_add(stdscr, row, C0, "No usage this month.", curses.A_DIM)
+
+        stdscr.refresh()
+        time.sleep(0.5)
+
+if __name__ == "__main__":
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        pass
+USAGE_EOF
+chmod +x "$USAGE_BIN"
+success "usage installed"
+
+# ── 6. patch ~/.claude/settings.json ─────────────────────────────────────────
+SETTINGS="$CLAUDE_DIR/settings.json"
+info "Patching $SETTINGS"
+
+"$PYTHON" << PYEOF
+import json, sys
+from pathlib import Path
+
+settings_path = Path("$SETTINGS")
+statusline_cmd = "$STATUSLINE"
+
+# Load existing settings or start fresh
+if settings_path.exists():
+    try:
+        settings = json.loads(settings_path.read_text())
+    except json.JSONDecodeError:
+        print("  ⚠  Could not parse settings.json — skipping statusLine patch.")
+        print("     Add this manually:")
+        print('     "statusLine": {"type": "command", "command": "' + statusline_cmd + '"}')
+        sys.exit(0)
+else:
+    settings = {}
+
+# Only set if not already pointing to this script
+existing = settings.get("statusLine", {})
+if isinstance(existing, dict) and existing.get("command") == statusline_cmd:
+    print("  (statusLine already configured, no change needed)")
+    sys.exit(0)
+
+if existing and isinstance(existing, dict) and existing.get("command"):
+    print(f"  ⚠  Replacing existing statusLine: {existing.get('command')}")
+
+settings["statusLine"] = {"type": "command", "command": statusline_cmd}
+settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+print("  ✓  statusLine configured in settings.json")
+PYEOF
+
+# ── 7. PATH update if needed ──────────────────────────────────────────────────
+if [[ "$NEED_PATH_UPDATE" == true ]]; then
+    warn "$INSTALL_DIR is not on your PATH"
+    SHELL_RC=""
+    if [[ -f "$HOME/.zshrc" ]]; then   SHELL_RC="$HOME/.zshrc"
+    elif [[ -f "$HOME/.bashrc" ]]; then SHELL_RC="$HOME/.bashrc"
+    elif [[ -f "$HOME/.profile" ]]; then SHELL_RC="$HOME/.profile"
+    fi
+    if [[ -n "$SHELL_RC" ]]; then
+        EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+        if grep -qF "$EXPORT_LINE" "$SHELL_RC" 2>/dev/null; then
+            info "PATH export already in $SHELL_RC"
+        else
+            echo "" >> "$SHELL_RC"
+            echo "# added by install-claude-usage" >> "$SHELL_RC"
+            echo "$EXPORT_LINE" >> "$SHELL_RC"
+            success "Added $INSTALL_DIR to PATH in $SHELL_RC"
+            warn "Run: source $SHELL_RC   (or open a new terminal)"
+        fi
+    else
+        warn "Could not find a shell rc file. Add this line manually:"
+        echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
+fi
+
+# ── done ──────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${B}${G}All done!${R}"
+echo ""
+echo -e "  Run ${B}usage${R} in any terminal to open the live dashboard."
+echo -e "  Rate limit bars appear after your first Claude Code turn."
+echo ""
