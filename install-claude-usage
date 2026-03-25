@@ -198,8 +198,11 @@ def main(stdscr):
     curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # output tokens
     curses.init_pair(6, curses.COLOR_WHITE,   -1)  # normal
 
-    BAR_W    = 38
+    BAR_W     = 38
     now_month = datetime.now(timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+    cached_month  = {}
+    cached_7day   = {}
+    last_parse    = 0.0   # epoch seconds
 
     while True:
         if stdscr.getch() in (ord('q'), ord('Q'), 27):
@@ -270,8 +273,14 @@ def main(stdscr):
         safe_add(stdscr, row, C4, "Cost",    curses.A_DIM | curses.A_BOLD)
         row += 1
 
-        def draw_token_table(since):
-            totals = parse_sessions(since)
+        # re-parse session files every 5 s; rate-limit cache is re-read every tick
+        mono = time.monotonic()
+        if mono - last_parse >= 5.0:
+            cached_month = parse_sessions(now_month)
+            cached_7day  = parse_sessions(now - timedelta(days=7))
+            last_parse   = mono
+
+        def draw_token_table(totals):
             grand  = {"input":0,"output":0,"cache_r":0,"cache_w":0,"cost":0.0}
             nonlocal row
             if totals:
@@ -294,7 +303,7 @@ def main(stdscr):
                 safe_add(stdscr, row, C0, "No usage.", curses.A_DIM)
             row += 1
 
-        draw_token_table(now_month)
+        draw_token_table(cached_month)
 
         if row < h - 4:
             row += 1
@@ -308,7 +317,7 @@ def main(stdscr):
             safe_add(stdscr, row, C3, "Cache↓",  curses.A_DIM | curses.A_BOLD)
             safe_add(stdscr, row, C4, "Cost",    curses.A_DIM | curses.A_BOLD)
             row += 1
-            draw_token_table(now - timedelta(days=7))
+            draw_token_table(cached_7day)
 
         stdscr.refresh()
         time.sleep(0.5)
