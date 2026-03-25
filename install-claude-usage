@@ -233,14 +233,19 @@ def main(stdscr):
                 if key not in rl: continue
                 info = rl[key]
                 if not isinstance(info, dict) or "used_percentage" not in info: continue
-                pct = float(info["used_percentage"])
                 ts_raw = info.get("resets_at")
                 reset_str = ""
+                reset_passed = False
                 if ts_raw:
                     try:
-                        reset_str = fmt_until(float(ts_raw))
+                        reset_at = float(ts_raw)
+                        if reset_at <= now.timestamp():
+                            reset_passed = True
+                        else:
+                            reset_str = fmt_until(reset_at)
                     except Exception:
                         pass
+                pct = 0.0 if reset_passed else float(info["used_percentage"])
                 cp = 1 if pct < 60 else (2 if pct < 85 else 3)
                 lk = key.lower()
                 label = "5-hour" if "five" in lk else "weekly" if "seven" in lk else key
