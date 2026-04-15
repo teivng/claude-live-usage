@@ -228,7 +228,9 @@ def main(stdscr):
         if rl and isinstance(rl, dict):
             order = ["five_hour", "seven_day"]
             ordered = order + [k for k in rl if k not in order]
-            drawn = 0
+
+            # first pass: collect per-bar data and find the longest reset string
+            bars = []
             for key in ordered:
                 if key not in rl: continue
                 info = rl[key]
@@ -249,16 +251,22 @@ def main(stdscr):
                 cp = 1 if pct < 60 else (2 if pct < 85 else 3)
                 lk = key.lower()
                 label = "5-hour" if "five" in lk else "weekly" if "seven" in lk else key
-                # shrink bar so pct (6 chars) always fits; drop reset if still too narrow
                 rst_display = f"  resets {reset_str}" if reset_str else ""
-                bar_w = min(BAR_MAX, w - 22 - len(rst_display))
-                if bar_w < 4:
-                    rst_display = ""
+                bars.append((label, pct, cp, rst_display))
+
+            # compute a single bar_w for all bars using the longest reset suffix
+            drawn = 0
+            if bars:
+                max_rst = max(len(b[3]) for b in bars)
+                bar_w = min(BAR_MAX, w - 22 - max_rst)
+                if bar_w < 4:   # reset strings won't fit — drop them all
                     bar_w = min(BAR_MAX, w - 21)
+                    bars = [(lbl, pct, cp, "") for lbl, pct, cp, _ in bars]
                 bar_w = max(4, bar_w)
-                draw_bar(stdscr, row, 2, label, pct, bar_w, rst_display, cp)
-                row += 1
-                drawn += 1
+                for label, pct, cp, rst_display in bars:
+                    draw_bar(stdscr, row, 2, label, pct, bar_w, rst_display, cp)
+                    row += 1
+                    drawn += 1
             if not drawn:
                 safe_add(stdscr, row, 2, "Waiting for rate limit data…", curses.A_DIM)
                 row += 1
