@@ -175,7 +175,7 @@ def safe_add(win, y, x, text, attr=0):
     try: win.addstr(y, x, str(text)[:w-x-1], attr)
     except curses.error: pass
 
-def draw_bar(win, y, x, label, pct, width, reset_str, cp):
+def draw_bar(win, y, x, label, pct, width, reset_suffix, cp):
     filled = max(0, min(width, round(pct / 100 * width)))
     bar = "█" * filled + "░" * (width - filled)
     safe_add(win, y, x,            f"{label:<10}", curses.A_BOLD)
@@ -183,8 +183,8 @@ def draw_bar(win, y, x, label, pct, width, reset_str, cp):
     safe_add(win, y, x+11,         bar,            curses.color_pair(cp) | curses.A_BOLD)
     safe_add(win, y, x+11+width,   "]",            curses.A_DIM)
     safe_add(win, y, x+13+width,   f"{pct:5.1f}%", curses.color_pair(cp) | curses.A_BOLD)
-    if reset_str:
-        safe_add(win, y, x+20+width, f"  resets {reset_str}", curses.A_DIM)
+    if reset_suffix:
+        safe_add(win, y, x+20+width, reset_suffix,  curses.A_DIM)
 
 def main(stdscr):
     curses.curs_set(0)
@@ -198,7 +198,7 @@ def main(stdscr):
     curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # output tokens
     curses.init_pair(6, curses.COLOR_WHITE,   -1)  # normal
 
-    BAR_W     = 38
+    BAR_MAX   = 40
     now_month = datetime.now(timezone.utc).replace(day=1,hour=0,minute=0,second=0,microsecond=0)
     cached_month  = {}
     cached_7day   = {}
@@ -249,7 +249,14 @@ def main(stdscr):
                 cp = 1 if pct < 60 else (2 if pct < 85 else 3)
                 lk = key.lower()
                 label = "5-hour" if "five" in lk else "weekly" if "seven" in lk else key
-                draw_bar(stdscr, row, 2, label, pct, BAR_W, reset_str, cp)
+                # shrink bar so pct (6 chars) always fits; drop reset if still too narrow
+                rst_display = f"  resets {reset_str}" if reset_str else ""
+                bar_w = min(BAR_MAX, w - 22 - len(rst_display))
+                if bar_w < 4:
+                    rst_display = ""
+                    bar_w = min(BAR_MAX, w - 21)
+                bar_w = max(4, bar_w)
+                draw_bar(stdscr, row, 2, label, pct, bar_w, rst_display, cp)
                 row += 1
                 drawn += 1
             if not drawn:
