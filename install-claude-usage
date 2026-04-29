@@ -125,8 +125,11 @@ def fmt_cost(u):
 def fmt_until(ts):
     delta = datetime.fromtimestamp(ts, tz=timezone.utc) - datetime.now(timezone.utc)
     s = max(0, int(delta.total_seconds()))
-    h, r = divmod(s, 3600)
-    return f"{h}h {r//60:02d}m" if h else f"{r//60}m {s%60:02d}s"
+    d, r = divmod(s, 86400)
+    h, r = divmod(r, 3600)
+    if d:    return f"{d}d {h:02d}h"
+    if h:    return f"{h}h {r//60:02d}m"
+    return   f"{r//60}m {s%60:02d}s"
 
 def parse_sessions(since):
     totals = {}
