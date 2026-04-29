@@ -65,7 +65,7 @@ from pathlib import Path
 try:
     data = json.loads(sys.stdin.read())
     rate_limits = data.get("rate_limits")
-    if rate_limits:
+    if rate_limits is not None:   # write even {} so display can distinguish "no limits" from "not yet"
         cache = Path.home() / ".claude" / "rate-limits-cache.json"
         cache.write_text(json.dumps(rate_limits))
 except Exception:
@@ -143,8 +143,8 @@ def parse_sessions(since):
                 if not line.strip(): continue
                 d = json.loads(line)
                 msg = d.get("message", {})
-                usage = msg.get("usage", {})
-                model = msg.get("model", "")
+                usage = msg.get("usage") or d.get("usage", {})
+                model = msg.get("model") or d.get("model", "")
                 if not usage or not model or is_local(model): continue
                 inp = usage.get("input_tokens", 0)
                 out = usage.get("output_tokens", 0)
@@ -228,7 +228,7 @@ def main(stdscr):
         safe_add(stdscr, row, 0, "Rate Limits", curses.A_BOLD | curses.color_pair(4))
         row += 1
 
-        if rl and isinstance(rl, dict):
+        if rl is not None and isinstance(rl, dict):
             order = ["five_hour", "seven_day"]
             ordered = order + [k for k in rl if k not in order]
 
@@ -271,11 +271,11 @@ def main(stdscr):
                     row += 1
                     drawn += 1
             if not drawn:
-                safe_add(stdscr, row, 2, "Waiting for rate limit data…", curses.A_DIM)
+                safe_add(stdscr, row, 2, "No rate limits reported for this account.", curses.A_DIM)
                 row += 1
         else:
             safe_add(stdscr, row, 2,
-                "No data yet — updates after your next Claude Code turn.", curses.A_DIM)
+                "No data yet — make a Claude Code turn to populate.", curses.A_DIM)
             row += 1
 
         row += 1
